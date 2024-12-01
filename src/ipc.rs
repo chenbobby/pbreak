@@ -8,7 +8,7 @@ pub struct Pipe {
 impl Pipe {
     pub unsafe fn new() -> Pipe {
         let mut fds = vec![0; 2];
-        if libc::pipe2(fds.as_mut_ptr(), 0) < 0 {
+        if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) < 0 {
             let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
             panic!("failed to open pipe: {:?}", errno_message);
         };
@@ -93,17 +93,17 @@ impl Drop for Pipe {
 
 #[cfg(test)]
 mod test {
-    use crate::ipc::Pipe;
+    use super::Pipe;
 
     #[test]
-    fn new_and_drop_succeeds() {
+    fn pipe_new_and_drop_succeeds() {
         unsafe {
             Pipe::new();
         }
     }
 
     #[test]
-    fn send_and_receive_succeeds() {
+    fn pipe_send_and_receive_succeeds() {
         unsafe {
             let pipe = Pipe::new();
             let s = "message";
@@ -113,7 +113,7 @@ mod test {
     }
 
     #[test]
-    fn close_succeeds() {
+    fn pipe_close_succeeds() {
         unsafe {
             let mut pipe = Pipe::new();
             pipe.close_receiver();

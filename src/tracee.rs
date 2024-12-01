@@ -1,7 +1,7 @@
 use std::{
     ffi::{CStr, CString},
     process::exit,
-    ptr::null_mut,
+    ptr::{null, null_mut},
 };
 
 use crate::ipc::Pipe;
@@ -23,10 +23,8 @@ impl Tracee {
     // Constructs a `Tracee` by attaching to an existing PID.
     pub unsafe fn from_pid(pid: libc::pid_t) -> Tracee {
         if libc::ptrace(libc::PTRACE_ATTACH, pid) < 0 {
-            let errno_message = CString::from_raw(libc::strerror(*libc::__errno_location()))
-                .into_string()
-                .unwrap();
-            panic!("failed to attach to pid ({}): {}", pid, errno_message);
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!("failed to attach to pid ({}): {:?}", pid, errno_message);
         }
 
         let mut tracee = Tracee {
@@ -47,32 +45,34 @@ impl Tracee {
             0 => {
                 // Child process
                 if libc::ptrace(libc::PTRACE_TRACEME) < 0 {
-                    let errno_message =
-                        CString::from_raw(libc::strerror(*libc::__errno_location()))
-                            .into_string()
-                            .unwrap();
+                    let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
                     pipe.send(&format!(
-                        "failed to ptrace newly forked process: {}",
+                        "failed to ptrace newly forked process: {:?}",
                         errno_message,
                     ));
                     exit(-1);
                 }
 
-                let program_char_ptr = program.as_ptr();
-                let args_char_ptr = args
+                let program = CString::new(program).unwrap();
+                let mut args = args
                     .iter()
-                    .map(|arg| arg.as_ptr())
-                    .collect::<Vec<*const u8>>()
-                    .as_ptr();
-                if libc::execvp(program_char_ptr, args_char_ptr) < 0 {
+                    .map(|arg| {
+                        let arg = CString::new(arg.as_bytes()).unwrap();
+                        arg.as_ptr()
+                    })
+                    .collect::<Vec<*const libc::c_char>>();
+                args.push(null());
+
+                if libc::execvp(program.as_ptr(), args.as_ptr()) < 0 {
                     let errno_message =
                         CString::from_raw(libc::strerror(*libc::__errno_location()))
                             .into_string()
                             .unwrap();
                     pipe.send(&format!(
-                        "failed to exec newly forked process: {}",
+                        "failed to exec newly forked process: {:?}",
                         errno_message
-                    ))
+                    ));
+                    exit(-1);
                 }
 
                 unreachable!("newly forked process should have successfully exec'ed");
@@ -86,12 +86,12 @@ impl Tracee {
                     status: TraceeStatus::Stopped,
                 };
 
-                tracee.wait_on_signal();
-
                 let err_str = pipe.receive();
                 if err_str.len() > 0 {
                     panic!("failed to fork and trace: {}", err_str);
                 }
+
+                tracee.wait_on_signal();
 
                 return tracee;
             }
@@ -102,10 +102,8 @@ impl Tracee {
         let mut wait_status = 0;
         let wait_options = 0;
         if libc::waitpid(self.pid, &mut wait_status, wait_options) < 0 {
-            let errno_message = CString::from_raw(libc::strerror(*libc::__errno_location()))
-                .into_string()
-                .unwrap();
-            panic!("failed to wait on pid ({}): {}", self.pid, errno_message);
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!("failed to wait on pid ({}): {:?}", self.pid, errno_message);
         }
 
         if libc::WIFSTOPPED(wait_status) {
@@ -150,10 +148,8 @@ impl Tracee {
             null_mut::<*mut libc::c_void>(),
         ) < 0
         {
-            let errno_message = CString::from_raw(libc::strerror(*libc::__errno_location()))
-                .into_string()
-                .unwrap();
-            panic!("failed to continue: {}", errno_message,);
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!("failed to continue: {:?}", errno_message);
         }
     }
 }
@@ -175,6 +171,54 @@ impl Drop for Tracee {
             libc::kill(self.pid, libc::SIGCONT);
             libc::kill(self.pid, libc::SIGKILL);
             self.wait_on_signal();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ffi::CString;
+
+    use super::Tracee;
+
+    #[test]
+    fn tracee_from_pid_succeeds_on_existing_pid() {
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    // Child process
+                    let program = CString::new("yes").unwrap();
+                    let args = vec![];
+                    libc::execvp(program.as_ptr(), args.as_ptr());
+                }
+                pid => {
+                    // Parent process
+                    Tracee::from_pid(pid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn tracee_from_pid_panics_on_nonexistent_pid() {
+        unsafe {
+            Tracee::from_pid(-1);
+        }
+    }
+
+    #[test]
+    fn tracee_from_cmd_succeeds_on_valid_program() {
+        unsafe {
+            Tracee::from_cmd("sleep", &vec!["1".to_string()]);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn tracee_from_cmd_panics_on_nonexistent_program() {
+        unsafe {
+            Tracee::from_cmd("nonexistent_program", &vec![]);
         }
     }
 }

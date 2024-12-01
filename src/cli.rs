@@ -37,7 +37,9 @@ impl Command {
         return match self {
             Command::Missing => self.run_missing(),
             Command::Attach { pid } => self.run_attach(*pid),
-            Command::Fork { program, args } => self.run_fork(program, args),
+            Command::Fork { program, args } => {
+                self.run_fork(program, args);
+            }
         };
     }
 
