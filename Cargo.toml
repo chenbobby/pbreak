@@ -1,0 +1,16 @@
+[package]
+name = "pbreak"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pbreak"
+path = "src/main.rs"
+
+[lib]
+name = "pbreak"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2.167"
+thiserror = "2.0.3"
