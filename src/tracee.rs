@@ -140,7 +140,7 @@ impl Tracee {
         unreachable!("unexpected wait status [{}]", wait_status);
     }
 
-    pub unsafe fn resume(&self) {
+    pub unsafe fn resume(&mut self) {
         if libc::ptrace(
             libc::PTRACE_CONT,
             self.pid,
@@ -151,6 +151,7 @@ impl Tracee {
             let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
             panic!("failed to continue: {:?}", errno_message);
         }
+        self.status = TraceeStatus::Running;
     }
 }
 
@@ -161,34 +162,38 @@ impl Drop for Tracee {
         }
 
         unsafe {
+            let mut wait_status = 0;
+            let wait_options = 0;
             if self.status == TraceeStatus::Running {
                 libc::kill(self.pid, libc::SIGSTOP);
-                self.wait_on_signal();
+                libc::waitpid(self.pid, &mut wait_status, wait_options);
             }
 
             libc::ptrace(libc::PTRACE_DETACH, self.pid);
 
             libc::kill(self.pid, libc::SIGCONT);
             libc::kill(self.pid, libc::SIGKILL);
-            self.wait_on_signal();
+            libc::waitpid(self.pid, &mut wait_status, wait_options);
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::ffi::CString;
+    use std::{ffi::CString, io::BufRead, ptr::null};
 
     use super::Tracee;
 
     #[test]
-    fn tracee_from_pid_succeeds_on_existing_pid() {
+    fn tracee_from_pid_succeeds_when_pid_exists() {
         unsafe {
             match libc::fork() {
                 0 => {
                     // Child process
-                    let program = CString::new("yes").unwrap();
-                    let args = vec![];
+                    let program = CString::new("sleep").unwrap();
+                    let arg = CString::new("1").unwrap();
+                    let mut args = vec![arg.as_ptr()];
+                    args.push(null());
                     libc::execvp(program.as_ptr(), args.as_ptr());
                 }
                 pid => {
@@ -201,24 +206,80 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn tracee_from_pid_panics_on_nonexistent_pid() {
+    fn tracee_from_pid_panics_when_pid_does_not_exist() {
         unsafe {
             Tracee::from_pid(-1);
         }
     }
 
     #[test]
-    fn tracee_from_cmd_succeeds_on_valid_program() {
+    fn tracee_from_cmd_succeeds_when_command_is_valid() {
         unsafe {
-            Tracee::from_cmd("sleep", &vec!["1".to_string()]);
+            let tracee = Tracee::from_cmd("sleep", &vec!["1".to_string()]);
+            let status = procfs_read_status(tracee.pid);
+            assert_eq!('t', status);
         }
     }
 
     #[test]
     #[should_panic]
-    fn tracee_from_cmd_panics_on_nonexistent_program() {
+    fn tracee_from_cmd_panics_when_command_is_not_valid() {
         unsafe {
             Tracee::from_cmd("nonexistent_program", &vec![]);
         }
+    }
+
+    #[test]
+    fn tracee_resume_succeeds_when_tracee_is_from_pid() {
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    // Child process
+                    let program = CString::new("sleep").unwrap();
+                    let arg = CString::new("1").unwrap();
+                    let mut args = vec![arg.as_ptr()];
+                    args.push(null());
+                    libc::execvp(program.as_ptr(), args.as_ptr());
+                }
+                pid => {
+                    // Parent process
+                    let mut tracee = Tracee::from_pid(pid);
+                    tracee.resume();
+                    let status = procfs_read_status(tracee.pid);
+                    assert_eq!('R', status);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tracee_resume_succeeds_when_tracee_is_from_cmd() {
+        unsafe {
+            let mut tracee = Tracee::from_cmd("sleep", &vec!["1".to_string()]);
+            tracee.resume();
+            let status = procfs_read_status(tracee.pid);
+            assert_eq!('R', status);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn tracee_resume_panics_when_tracee_has_existed() {
+        unsafe {
+            let mut tracee = Tracee::from_cmd("echo", &vec![]);
+            tracee.resume();
+            tracee.wait_on_signal();
+            tracee.resume();
+        }
+    }
+
+    fn procfs_read_status(pid: libc::pid_t) -> char {
+        let procfs_path = format!("/proc/{}/stat", pid);
+        let file = std::fs::File::open(procfs_path).unwrap();
+        let mut file_reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        file_reader.read_line(&mut line).unwrap();
+        let status_index = line.rfind(")").unwrap() + 2;
+        return line.chars().nth(status_index).unwrap();
     }
 }
