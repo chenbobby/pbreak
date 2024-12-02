@@ -1,5 +1,6 @@
 use std::{
     ffi::{CStr, CString},
+    mem,
     process::exit,
     ptr::{null, null_mut},
 };
@@ -22,7 +23,13 @@ pub struct Tracee {
 impl Tracee {
     // Constructs a `Tracee` by attaching to an existing PID.
     pub unsafe fn from_pid(pid: libc::pid_t) -> Tracee {
-        if libc::ptrace(libc::PTRACE_ATTACH, pid) < 0 {
+        if libc::ptrace(
+            libc::PTRACE_ATTACH,
+            pid,
+            null_mut::<*mut libc::c_void>(),
+            null_mut::<*mut libc::c_void>(),
+        ) < 0
+        {
             let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
             panic!("failed to attach to pid ({}): {:?}", pid, errno_message);
         }
@@ -44,7 +51,13 @@ impl Tracee {
         match libc::fork() {
             0 => {
                 // Child process
-                if libc::ptrace(libc::PTRACE_TRACEME) < 0 {
+                if libc::ptrace(
+                    libc::PTRACE_TRACEME,
+                    null_mut::<*mut libc::c_void>(),
+                    null_mut::<*mut libc::c_void>(),
+                    null_mut::<*mut libc::c_void>(),
+                ) < 0
+                {
                     let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
                     pipe.send(&format!(
                         "failed to ptrace newly forked process: {:?}",
@@ -153,6 +166,92 @@ impl Tracee {
         }
         self.status = TraceeStatus::Running;
     }
+
+    pub unsafe fn read_general_purpose_registers(&self) -> libc::user_regs_struct {
+        let mut data = mem::MaybeUninit::<libc::user_regs_struct>::uninit();
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr() as *mut libc::c_void,
+            iov_len: mem::size_of::<libc::user_regs_struct>(),
+        };
+        if libc::ptrace(
+            libc::PTRACE_GETREGSET,
+            self.pid,
+            libc::NT_PRSTATUS,
+            &mut iov as *mut libc::iovec,
+        ) < 0
+        {
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!(
+                "failed to read general purpose registers: {:?}",
+                errno_message
+            );
+        };
+        let regs = data.assume_init();
+        return regs;
+    }
+
+    pub unsafe fn write_general_purpose_registers(&self, regs: &mut libc::user_regs_struct) {
+        let mut iov = libc::iovec {
+            iov_base: regs as *mut libc::user_regs_struct as *mut libc::c_void,
+            iov_len: mem::size_of::<libc::user_regs_struct>(),
+        };
+        if libc::ptrace(
+            libc::PTRACE_SETREGSET,
+            self.pid,
+            libc::NT_PRSTATUS,
+            &mut iov as *mut libc::iovec as *mut libc::c_void,
+        ) < 0
+        {
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!(
+                "failed to write general purpose registers: {:?}",
+                errno_message
+            );
+        };
+    }
+
+    pub unsafe fn read_floating_point_registers(&self) -> libc::user_fpsimd_struct {
+        let mut data = mem::MaybeUninit::<libc::user_fpsimd_struct>::uninit();
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr() as *mut libc::c_void,
+            iov_len: mem::size_of::<libc::user_fpsimd_struct>(),
+        };
+        if libc::ptrace(
+            libc::PTRACE_GETREGSET,
+            self.pid,
+            libc::NT_PRFPREG,
+            &mut iov as *mut libc::iovec as *mut libc::c_void,
+        ) < 0
+        {
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!(
+                "failed to read floating point registers: {:?}",
+                errno_message
+            );
+        };
+        let regs = data.assume_init();
+        return regs;
+    }
+
+    pub unsafe fn write_floating_point_registers(&self, regs: &mut libc::user_fpsimd_struct) {
+        let mut iov = libc::iovec {
+            iov_base: regs as *mut libc::user_fpsimd_struct as *mut libc::c_void,
+            iov_len: mem::size_of::<libc::user_fpsimd_struct>(),
+        };
+        if libc::ptrace(
+            libc::PTRACE_SETREGSET,
+            self.pid,
+            libc::NT_PRFPREG,
+            &mut iov as *mut libc::iovec as *mut libc::c_void,
+        ) < 0
+        {
+            let errno_message = CStr::from_ptr(libc::strerror(*libc::__errno_location()));
+            panic!(
+                "failed to write floating point registers: {:?}",
+                errno_message
+            );
+        };
+    }
 }
 
 impl Drop for Tracee {
@@ -169,7 +268,12 @@ impl Drop for Tracee {
                 libc::waitpid(self.pid, &mut wait_status, wait_options);
             }
 
-            libc::ptrace(libc::PTRACE_DETACH, self.pid);
+            libc::ptrace(
+                libc::PTRACE_DETACH,
+                self.pid,
+                null_mut::<*mut libc::c_void>(),
+                null_mut::<*mut libc::c_void>(),
+            );
 
             libc::kill(self.pid, libc::SIGCONT);
             libc::kill(self.pid, libc::SIGKILL);
@@ -270,6 +374,22 @@ mod test {
             tracee.resume();
             tracee.wait_on_signal();
             tracee.resume();
+        }
+    }
+
+    #[test]
+    fn tracee_read_general_purpose_registers_works() {
+        unsafe {
+            let tracee = Tracee::from_cmd("echo", &vec![]);
+            tracee.read_general_purpose_registers();
+        }
+    }
+
+    #[test]
+    fn tracee_read_floating_point_registers_works() {
+        unsafe {
+            let tracee = Tracee::from_cmd("echo", &vec![]);
+            tracee.read_floating_point_registers();
         }
     }
 

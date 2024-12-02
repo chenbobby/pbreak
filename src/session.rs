@@ -28,6 +28,29 @@ pub unsafe fn handle_command(tracee: &mut Tracee, line: &str) {
             tracee.resume();
             tracee.wait_on_signal();
         }
+        "readgp" => {
+            let regs = tracee.read_general_purpose_registers();
+            dbg!(regs.regs);
+            dbg!(regs.sp);
+            dbg!(regs.pc);
+            dbg!(regs.pstate);
+        }
+        "writegp" => {
+            let mut regs = tracee.read_general_purpose_registers();
+            regs.sp = 99999999;
+            tracee.write_general_purpose_registers(&mut regs);
+        }
+        "readfp" => {
+            let regs = tracee.read_floating_point_registers();
+            dbg!(regs.vregs);
+            dbg!(regs.fpsr);
+            dbg!(regs.fpcr);
+        }
+        "writefp" => {
+            let mut regs = tracee.read_floating_point_registers();
+            regs.fpcr = 99999999;
+            tracee.write_floating_point_registers(&mut regs);
+        }
         line => {
             println!("unexpected command: \"{}\"", line);
         }
